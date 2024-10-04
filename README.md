@@ -26,6 +26,7 @@ seperate environment.
 - [ ] normalize environment name (lowercase alphanumeric)
 - [ ] domain skeleton function
 - [ ] wouter: verplichte repo url default_tags
+- [ ] wouter: create default directories
 - [ ] add default tags
 - [ ] implement asserts
     - [ ] full test
