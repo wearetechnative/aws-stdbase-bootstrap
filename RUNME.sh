@@ -290,9 +290,26 @@ init_project(){
 
   gum confirm "Check if above information is correct? Continue?" && continue=1 || exit 1
 
+
   init_domain "01_shared_kms"
   init_domain "02_backend_config"
   init_domain "03_sqs_dlq"
+
+  if [ $USE_ASSUME_ROLE = "no" ]
+  then
+    gum style \
+      --foreground 212 --border-foreground 212 --border double \
+      --align left --width 80 --margin "1 2" --padding "2 4" \
+      "You are not using Assume Role to authenticate." \
+      "" \
+      "Before running ./RUNME.sh bootstrap_infra_env, make sure" \
+      "you edit 01_shared_kms/main.tf" \
+      "" \
+      "The first block need to be removed and the commented blocks" \
+      "need to be made correct."
+  fi
+
+
 }
 
 clean_domain(){

@@ -1,3 +1,5 @@
+### IF USE ASSUME ROLE IS TRUE YOU NEED THIS CONFIGURATION BELOW
+
 module "default_kms" {
 
   source = "git@github.com:wearetechnative/terraform-aws-kms.git"
@@ -5,7 +7,6 @@ module "default_kms" {
   name        = "default_kms"
   role_access = []
 }
-
 
 ### IF USE ASSUME ROLE IS FALSE YOU NEED THIS CONFIGURATION BELOW
 
