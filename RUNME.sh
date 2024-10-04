@@ -29,7 +29,7 @@ us-west-2
 END_HEREDOC
 )
 
-TFBACKENDTPL=$(
+TF_BACKEND_TPL_ASSUME=$(
 cat <<'END_HEREDOC'
 # vim: set ft=hcl:
 role_arn       = "ROLE_ARN"
@@ -38,8 +38,16 @@ dynamodb_table = "terraform-state-lock"
 END_HEREDOC
 )
 
+TF_BACKEND_TPL=$(
+cat <<'END_HEREDOC'
+# vim: set ft=hcl:
+bucket         = "STATE_BUCKET"
+dynamodb_table = "terraform-state-lock"
+END_HEREDOC
+)
 
-TFVARSTPL=$(
+
+TF_VARS_TPL=$(
 cat <<'END_HEREDOC2'
 {
   "aws_account_id": "AWS_ACCOUNT_ID",
@@ -49,7 +57,7 @@ cat <<'END_HEREDOC2'
 END_HEREDOC2
 )
 
-DOMTFPROVIDERTPL=$(
+DOM_TF_PROVIDER_TPL_ASSUME=$(
 cat <<'END_HEREDOC'
 provider "aws" {
   region              = "DEF_REGION"
@@ -70,6 +78,24 @@ provider "aws" {
 END_HEREDOC
 )
 
+DOM_TF_PROVIDER_TPL=$(
+cat <<'END_HEREDOC'
+provider "aws" {
+  region              = "DEF_REGION"
+  allowed_account_ids = [ "${var.aws_account_id}" ]
+
+  default_tags {
+    tags = {
+      Project     = "PROJECT_NAME"
+      Stack       = "shared"
+    }
+  }
+}
+END_HEREDOC
+)
+
+
+
 checkdeps(){
   if ! command -v $1 &> /dev/null
   then
@@ -79,7 +105,7 @@ checkdeps(){
   fi
 }
 
-make_infra_environment(){
+write_infra_environment_files(){
 
   if [ -d "./infra_environments/${ENVIRONMENT_NAME}" ]; then
     echo "ERROR: $ENVIRONMENT_NAME already exist."
@@ -90,12 +116,18 @@ make_infra_environment(){
 
   STATE_BUCKET="terraform-state-${AWS_ACCOUNT_ID}-${ENVIRONMENT_NAME}"
 
-  TFBACKENDTPL="${TFBACKENDTPL/STATE_BUCKET/"$STATE_BUCKET"}"
-  echo "${TFBACKENDTPL/ROLE_ARN/"$ROLE_ARN"}" > ./infra_environments/${ENVIRONMENT_NAME}/${ENVIRONMENT_NAME}.tfbackend
+  if [ $USE_ASSUME_ROLE = "yes" ]
+  then
+    TF_BACKEND_TPL_ASSUME="${TF_BACKEND_TPL_ASSUME/STATE_BUCKET/"$STATE_BUCKET"}"
+    echo "${TF_BACKEND_TPL_ASSUME/ROLE_ARN/"$ROLE_ARN"}" > ./infra_environments/${ENVIRONMENT_NAME}/${ENVIRONMENT_NAME}.tfbackend
+  else
+    TF_BACKEND_TPL="${TF_BACKEND_TPL/STATE_BUCKET/"$STATE_BUCKET"}"
+    echo "${TF_BACKEND_TPL/ROLE_ARN/"$ROLE_ARN"}" > ./infra_environments/${ENVIRONMENT_NAME}/${ENVIRONMENT_NAME}.tfbackend
+  fi
 
-  TFVARSTPL="${TFVARSTPL/AWS_ACCOUNT_ID/"$AWS_ACCOUNT_ID"}"
-  TFVARSTPL="${TFVARSTPL/ENVIRONMENT_NAME/"$ENVIRONMENT_NAME"}"
-  echo "$TFVARSTPL" > ./infra_environments/${ENVIRONMENT_NAME}/${ENVIRONMENT_NAME}.tfvars.json
+  TF_VARS_TPL="${TF_VARS_TPL/AWS_ACCOUNT_ID/"$AWS_ACCOUNT_ID"}"
+  TF_VARS_TPL="${TF_VARS_TPL/ENVIRONMENT_NAME/"$ENVIRONMENT_NAME"}"
+  echo "$TF_VARS_TPL" > ./infra_environments/${ENVIRONMENT_NAME}/${ENVIRONMENT_NAME}.tfvars.json
 }
 
 ##### PLACE YOUR COMMANDS BELOW #####
@@ -104,6 +136,13 @@ get_project_vals(){
   DEF_REGION=`cat stack/01_shared_kms/tf_backend.tf | yj -cj | jq -r ".terraform[0].backend[0].s3[0].region"`
   PROJECT_NAME=`cat stack/01_shared_kms/providers.tf | yj -cj | jq -r ".provider[0].aws[0].default_tags[0].tags[0].Project"`
   ROLE_NAME=`cat stack/01_shared_kms/providers.tf | yj -cj | jq -r ".provider[0].aws[0].assume_role[0].role_arn" | cut -d "/" -f 2`
+
+  if [ $ROLE_NAME = "null" ]
+  then
+    USE_ASSUME_ROLE="no"
+  else
+    USE_ASSUME_ROLE="yes"
+  fi
 
   if [ -z "$PROJECT_NAME" ]
   then
@@ -119,47 +158,13 @@ get_project_vals(){
   fi
 }
 
-init_env(){
-
-  get_project_vals
-
-  ENVIRONMENT_NAME=`gum input ${PROMPSTYLE} --prompt "Enter environment name: " `
-  AWS_ACCOUNT_ID=`gum input ${PROMPSTYLE} --prompt "Enter destination AWS Account Id: " --placeholder="000000000000" --char-limit=12`
-  ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${ROLE_NAME}"
-
-  gum style \
-    --foreground 212 --border-foreground 212 --border double \
-    --align left --width 100 --margin "1 2" --padding "2 4" \
-    "Project name:       ${PROJECT_NAME}" \
-    "Default Region:     ${DEF_REGION}" \
-    "Environment name:   ${ENVIRONMENT_NAME}" \
-    "AWS account ID:     ${AWS_ACCOUNT_ID}" \
-    "Role ARN:           ${ROLE_ARN}" \
-
-  gum confirm "Check if above information is correct? Continue?" && continue=1 || exit 1
-
-  echo "continue"
-
-  make_infra_environment
-}
-
 init_domain(){
   cd $ROOTDIR
   DOMAIN_KEY="$1"
   DOMAIN_PATH="stack/$1"
   cd $DOMAIN_PATH
 
-  if [ -f providers.tf ]; then
-    echo "ERROR: providers.tf exist in ${DOMAIN_PATH}. project has already been setup"
-    exit 1
-  fi
-  if [ -f tf_backend.tf ]; then
-    echo "ERROR: tf_backend.tf exist in ${DOMAIN_PATH}. project has already been setup"
-    exit 1
-  fi
-
-
-  DOMTFBACKENDTPL=$(
+  DOM_TF_BACKEND_TPL=$(
   cat <<'END_HEREDOC'
 terraform {
   backend "s3" {
@@ -171,14 +176,22 @@ terraform {
 END_HEREDOC
   )
 
-  DOMTFPROVIDERTPL="${DOMTFPROVIDERTPL/DEF_REGION/"$DEF_REGION"}"
-  DOMTFPROVIDERTPL="${DOMTFPROVIDERTPL/ROLE_NAME/"$ROLE_NAME"}"
-  DOMTFPROVIDERTPL="${DOMTFPROVIDERTPL/PROJECT_NAME/"$PROJECT_NAME"}"
-  echo "$DOMTFPROVIDERTPL" > providers.tf
+  if [ $USE_ASSUME_ROLE = "yes" ]
+  then
+    DOM_TF_PROVIDER_TPL_ASSUME="${DOM_TF_PROVIDER_TPL_ASSUME/DEF_REGION/"$DEF_REGION"}"
+    DOM_TF_PROVIDER_TPL_ASSUME="${DOM_TF_PROVIDER_TPL_ASSUME/ROLE_NAME/"$ROLE_NAME"}"
+    DOM_TF_PROVIDER_TPL_ASSUME="${DOM_TF_PROVIDER_TPL_ASSUME/PROJECT_NAME/"$PROJECT_NAME"}"
+    echo "$DOM_TF_PROVIDER_TPL_ASSUME" > providers.tf
+  else
+    DOM_TF_PROVIDER_TPL="${DOM_TF_PROVIDER_TPL/DEF_REGION/"$DEF_REGION"}"
+    DOM_TF_PROVIDER_TPL="${DOM_TF_PROVIDER_TPL/ROLE_NAME/"$ROLE_NAME"}"
+    DOM_TF_PROVIDER_TPL="${DOM_TF_PROVIDER_TPL/PROJECT_NAME/"$PROJECT_NAME"}"
+    echo "$DOM_TF_PROVIDER_TPL" > providers.tf
+  fi
 
-  DOMTFBACKENDTPL="${DOMTFBACKENDTPL/DEF_REGION/"$DEF_REGION"}"
-  DOMTFBACKENDTPL="${DOMTFBACKENDTPL/DOMAIN_KEY/"$DOMAIN_KEY"}"
-  echo "$DOMTFBACKENDTPL" > tf_backend.tf
+  DOM_TF_BACKEND_TPL="${DOM_TF_BACKEND_TPL/DEF_REGION/"$DEF_REGION"}"
+  DOM_TF_BACKEND_TPL="${DOM_TF_BACKEND_TPL/DOMAIN_KEY/"$DOMAIN_KEY"}"
+  echo "$DOM_TF_BACKEND_TPL" > tf_backend.tf
 
 }
 
@@ -224,24 +237,56 @@ migrate_domain(){
 
 make_command "requirements" "Show requirements"
 requirements(){
-  echo "- Project wide admin_role. All accounts should have this role with proper permissions"
+  echo "- is Assume Role, project wide admin_role. All accounts should have this role with proper permissions"
   echo "- Project wide default region. The Terraform States are stored in this region per account"
 }
+
+check_project_exist(){
+
+  cd $ROOTDIR
+  DOMAIN_PATH="stack/01_shared_kms"
+  cd $DOMAIN_PATH
+
+  if [ -f providers.tf ]; then
+    echo "ERROR: providers.tf exist in ${DOMAIN_PATH}. project has already been setup"
+    exit 1
+  fi
+  if [ -f tf_backend.tf ]; then
+    echo "ERROR: tf_backend.tf exist in ${DOMAIN_PATH}. project has already been setup"
+    exit 1
+  fi
+}
+
 
 ##1
 make_command "init_project" "Create infra conf files"
 init_project(){
 
-  PROJECT_NAME=`gum input ${PROMPSTYLE} --prompt "Enter Project name: "`
-  ROLE_NAME=`gum input ${PROMPSTYLE} --prompt "Enter Admin Role name: " --value='landing_zone_devops_administrator'`
-  DEF_REGION=`echo "${REGIONS}" | gum filter --prompt "Enter default region: "`
+  check_project_exist
 
-  gum style \
-    --foreground 212 --border-foreground 212 --border double \
-    --align left --width 80 --margin "1 2" --padding "2 4" \
-    "Project name:        ${PROJECT_NAME}" \
-    "Admin Role Name:     ${ROLE_NAME}" \
-    "Default region:      ${DEF_REGION}" \
+  PROJECT_NAME=`gum input ${PROMPSTYLE} --prompt "Enter Project name: "`
+  DEF_REGION=`echo "${REGIONS}" | gum filter --prompt "Enter default region: "`
+  USE_ASSUME_ROLE=`gum choose --header "Authenticate using Assume Role?" yes no`
+  if [ $USE_ASSUME_ROLE = "yes" ]
+  then
+    ROLE_NAME=`gum input ${PROMPSTYLE} --prompt "Enter Admin Role name: " --value='landing_zone_devops_administrator'`
+
+    gum style \
+      --foreground 212 --border-foreground 212 --border double \
+      --align left --width 80 --margin "1 2" --padding "2 4" \
+      "Project name:        ${PROJECT_NAME}" \
+      "Default region:      ${DEF_REGION}" \
+      "Use Assume Role:     ${USE_ASSUME_ROLE}" \
+      "Admin Role Name:     ${ROLE_NAME}"
+
+  else
+    gum style \
+      --foreground 212 --border-foreground 212 --border double \
+      --align left --width 80 --margin "1 2" --padding "2 4" \
+      "Project name:        ${PROJECT_NAME}" \
+      "Default region:      ${DEF_REGION}" \
+      "Use Assume Role:     ${USE_ASSUME_ROLE}"
+  fi
 
   gum confirm "Check if above information is correct? Continue?" && continue=1 || exit 1
 
@@ -275,8 +320,39 @@ clean_project(){
 make_command "bootstrap_infra_env" "Create infra conf files"
 bootstrap_infra_env(){
 
-  init_env
-  #ENVIRONMENT_NAME=`ls ./infra_environments/| gum choose`
+  get_project_vals
+
+  ENVIRONMENT_NAME=`gum input ${PROMPSTYLE} --prompt "Enter environment name: " `
+  AWS_ACCOUNT_ID=`gum input ${PROMPSTYLE} --prompt "Enter destination AWS Account Id: " --placeholder="000000000000" --char-limit=12`
+  ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${ROLE_NAME}"
+
+  if [ $USE_ASSUME_ROLE = "yes" ]
+  then
+    gum style \
+      --foreground 212 --border-foreground 212 --border double \
+      --align left --width 100 --margin "1 2" --padding "2 4" \
+      "Project name:       ${PROJECT_NAME}" \
+      "Default Region:     ${DEF_REGION}" \
+      "Environment name:   ${ENVIRONMENT_NAME}" \
+      "AWS account ID:     ${AWS_ACCOUNT_ID}" \
+      "Use Assume Role:    ${USE_ASSUME_ROLE}" \
+      "Role ARN:           ${ROLE_ARN}"
+  else
+    gum style \
+      --foreground 212 --border-foreground 212 --border double \
+      --align left --width 100 --margin "1 2" --padding "2 4" \
+      "Project name:       ${PROJECT_NAME}" \
+      "Default Region:     ${DEF_REGION}" \
+      "Environment name:   ${ENVIRONMENT_NAME}" \
+      "AWS account ID:     ${AWS_ACCOUNT_ID}" \
+      "Use Assume Role:    ${USE_ASSUME_ROLE}"
+  fi
+
+  gum confirm "Check if above information is correct? Continue?" && continue=1 || exit 1
+
+  echo "continue"
+
+  write_infra_environment_files
 
   setup_domain_with_local_state "01_shared_kms"
   update_kms_arn_in_tfvars
